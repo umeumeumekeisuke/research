@@ -5,7 +5,6 @@ import { QuickActions } from './QuickActions';
 import { VoiceInput } from './VoiceInput';
 import { ImageInput } from './ImageInput';
 import { Send, ArrowLeft } from 'lucide-react';
-import { botResponses } from '../data/responses';
 import * as Icons from 'lucide-react';
 
 interface ChatInterfaceProps {
@@ -30,7 +29,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
   }, [messages]);
 
   useEffect(() => {
-    // Welcome message when entering a category
     const welcomeMessage: Message = {
       id: '1',
       content: `こんにちは！${category.name}についてお手伝いします。${category.description}に関することなら、なんでもお気軽にご相談ください。\n\n💬 テキスト入力\n🎤 音声入力\n📷 画像アップロード\n\nどの方法でも対応できます！`,
@@ -41,7 +39,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
     setMessages([welcomeMessage]);
   }, [category]);
 
-  const sendMessage = (content: string, type: 'text' | 'voice' | 'image' = 'text') => {
+  const sendMessage = async (content: string, type: 'text' | 'voice' | 'image' = 'text') => {
     if (!content.trim()) return;
 
     const userMessage: Message = {
@@ -57,30 +55,34 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
     setInputValue('');
     setIsTyping(true);
 
-    // Simulate bot response
-    setTimeout(() => {
-      let botResponse = '';
-      
-      if (type === 'voice') {
-        botResponse = '音声メッセージを受信しました！とても自然な話し方ですね。';
-      } else if (type === 'image') {
-        botResponse = '画像を確認しました！詳細について説明いたします。画像に関連する情報やアドバイスが必要でしたら、お気軽にお聞かせください。';
-      } else {
-        const responses = botResponses[category.id] || botResponses.default;
-        botResponse = responses[Math.floor(Math.random() * responses.length)];
-      }
-      
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content,
+          category: category.id,
+          type
+        })
+      });
+
+      const data = await response.json();
+
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content: botResponse,
+        content: data.content,
         sender: 'bot',
-        timestamp: new Date(),
-        category: category.id
+        timestamp: new Date(data.timestamp),
+        category: data.category
       };
 
       setMessages(prev => [...prev, botMessage]);
-      setIsTyping(false);
-    }, 1000 + Math.random() * 1500);
+    } catch (error) {
+      console.error('API通信エラー:', error);
+      alert('サーバーとの通信に失敗しました。バックエンドが起動しているか確認してください。');
+    }
+
+    setIsTyping(false);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -100,10 +102,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
     <div className="flex flex-col h-full bg-gray-50">
       {/* Header */}
       <div className="flex items-center gap-4 p-4 border-b border-gray-200 bg-white shadow-sm">
-        <button
-          onClick={onBack}
-          className="p-2 hover:bg-gray-100 rounded-xl transition-colors duration-200"
-        >
+        <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-xl transition-colors duration-200">
           <ArrowLeft size={20} />
         </button>
         <div className={`p-3 rounded-xl ${category.color} text-white shadow-md`}>
@@ -124,12 +123,12 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
         {messages.map((message) => (
           <ChatMessage key={message.id} message={message} />
         ))}
-        
+
         {isTyping && (
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 flex items-center justify-center shadow-md">
               <div className="flex gap-1">
-                <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce\" style={{ animationDelay: '0ms' }}></div>
+                <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
                 <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
                 <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
               </div>
@@ -139,7 +138,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
             </div>
           </div>
         )}
-        
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -166,7 +165,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ category, onBack }
               className="w-full px-4 py-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
             />
           </div>
-          
+
           <div className="flex gap-2">
             <VoiceInput onVoiceInput={handleVoiceInput} />
             <ImageInput onImageUpload={handleImageUpload} />
