@@ -39,7 +39,7 @@ pushd backend >/dev/null
 # 仮想環境があれば有効化
 if [[ -d ".venv" ]]; then
   # shellcheck disable=SC1091
-  source .venv/bin/activate
+  source ~/.venv/bin/activate
 fi
 
 # ※ uvicorn をバックグラウンドで起動して PID を保持
