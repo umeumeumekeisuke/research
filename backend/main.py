@@ -2,9 +2,15 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import logging, os, re, json, requests, glob, httpx
+import logging, os, re, json, requests, glob
 from typing import List, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
+
+# httpx（未インストールでも動くフォールバック）
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 # ===== 基本設定 =====
 logging.basicConfig(level=logging.INFO)
@@ -86,26 +92,33 @@ CLUBS: List[dict] = DATA.get("clubs", []) or []
 
 # ===== ChatGPTユーティリティ =====
 def call_openai(messages: List[Dict[str, str]], timeout: int = 12) -> str:
-    """OpenAI Responses APIを叩いてテキストを返す"""
+    """OpenAI Responses APIを叩いてテキストを返す（httpxが無ければrequests）"""
     if not OPENAI_API_KEY:
         return ""
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    payload = {"model": OPENAI_MODEL, "input": messages, "store": False}
+    url = "https://api.openai.com/v1/responses"
     try:
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-        payload = {"model": OPENAI_MODEL, "input": messages, "store": False}
-        with httpx.Client(timeout=timeout) as client:
-            r = client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+        if httpx is not None:
+            with httpx.Client(timeout=timeout) as client:
+                r = client.post(url, headers=headers, json=payload)
+                r.raise_for_status()
+                data = r.json()
+        else:
+            r = requests.post(url, headers=headers, json=payload, timeout=timeout)
             r.raise_for_status()
             data = r.json()
-            for item in data.get("output", []):
-                if item.get("type") == "message":
-                    cont = item.get("content") or []
-                    if cont and isinstance(cont, list):
-                        first = cont[0]
-                        if first.get("type") == "output_text":
-                            return (first.get("text") or "").strip()
-                if item.get("type") == "output_text":
-                    return (item.get("text") or "").strip()
-            return (data.get("text") or "").strip()
+
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                cont = item.get("content") or []
+                if cont and isinstance(cont, list):
+                    first = cont[0]
+                    if first.get("type") == "output_text":
+                        return (first.get("text") or "").strip()
+            if item.get("type") == "output_text":
+                return (item.get("text") or "").strip()
+        return (data.get("text") or "").strip()
     except Exception as e:
         logging.warning(f"OpenAI error: {e}")
         return ""
@@ -283,12 +296,110 @@ def find_teacher(text: str) -> str:
         lines.append(f"...ほか {len(matches)-20} 件")
     return "\n".join(lines)
 
-# ===== サークル検索 =====
+# ===== サークル検索（強化版）=====
+_CLUB_STOPWORDS = re.compile(r"(琉球大学|琉大|大学|全学|部|クラブ|サークル|同好会|チーム|部活|・|－|-|ー|＿|‐|—|―|\s+)")
+
+def _norm_club(s: str) -> str:
+    s = s or ""
+    s = s.lower()
+    s = _CLUB_STOPWORDS.sub("", s)
+    return s
+
+def _tokenize(s: str) -> List[str]:
+    return [w for w in re.findall(r"[一-龥ぁ-んァ-ヴーa-z0-9]+", s.lower()) if w]
+
+# 種目→キーワードのマッピング（必要に応じて拡張）
+SPORT_KEYWORDS = {
+    "サッカー": ["サッカー", "soccer", "フットボール", "フットサル"],
+    "テニス": ["テニス", "tennis", "庭球"],
+    "バスケ": ["バスケ", "バスケット", "basketball", "3×3", "3x3"],
+    "バレー": ["バレー", "バレーボール", "volleyball"],
+    "野球": ["野球", "ベースボール", "baseball"],
+    "ラグビー": ["ラグビー", "rugby"],
+}
+
 def find_club(text: str) -> str:
-    for c in CLUBS:
-        if c.get("name") and c["name"] in text:
-            return f"🏷 {c['name']} — 活動日: {c.get('day','未記載')} / 場所: {c.get('location','未記載')}"
-    return "該当するサークル情報が見つかりませんでした。"
+    """
+    自然文に対応したサークル/部活検索。
+    - 曖昧一致（名称の正規化 & トークン照合）
+    - 種目キーワード（例: サッカー→サッカー/フットサル/フットボール）
+    - 一覧質問（どんな部活/サークルがある？）に簡易対応
+    """
+    if not CLUBS:
+        return "サークル・部活データが読み込まれていません。"
+
+    q_raw = text
+    q = q_raw.lower()
+    q_norm = _norm_club(q_raw)
+    q_tokens = _tokenize(q_raw)
+
+    # 一覧系の質問
+    if re.search(r"(どんな|一覧|全部|全て|なにが|何が).*(部|クラブ|サークル)", q) or q.strip() in {"部活","サークル","クラブ"}:
+        names = [c.get("name") for c in CLUBS if c.get("name")]
+        if not names:
+            return "サークル情報が空のようです。"
+        head = f"🏷 サークル/部活の例（{min(len(names), 20)}件表示 / 全{len(names)}件）:"
+        return "\n".join([head] + [f"- {n}" for n in names[:20]])
+
+    # 種目キーワード抽出（例: サッカー部ある？ → サッカー群を検索）
+    wanted_keywords = set()
+    for group, kws in SPORT_KEYWORDS.items():
+        if any(k.lower() in q for k in kws):
+            wanted_keywords.update([k.lower() for k in kws])
+
+    def score_item(it: dict) -> int:
+        s = 0
+        name = it.get("name") or ""
+        detail = it.get("detail") or ""
+        location = it.get("location") or ""
+        day = it.get("day") or ""
+        blob = (name + " " + detail + " " + location + " " + day).lower()
+
+        # 1) 正規化名称の相互包含（強）
+        nn = _norm_club(name)
+        if nn and (nn in q_norm or q_norm in nn):
+            s += 8
+
+        # 2) トークン一致（中）
+        s += sum(1 for t in q_tokens if t and t in blob)
+
+        # 3) 種目キーワード（強）
+        if wanted_keywords:
+            s += sum(2 for wk in wanted_keywords if wk in blob)
+
+        # 4) クエリが短い時の救済：代表語（部/クラブ/サークル）だけなら名前ヒント
+        if not q_tokens and ("部" in q or "クラブ" in q or "サークル" in q):
+            if "部" in name or "クラブ" in name or "サークル" in name:
+                s += 1
+
+        return s
+
+    scored = [(score_item(it), it) for it in CLUBS]
+    scored = [x for x in scored if x[0] > 0]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if not scored:
+        return "該当するサークル情報が見つかりませんでした。"
+
+    # 上位を返す（最大3件）
+    top = [it for (_, it) in scored[:3]]
+
+    def fmt(c: dict) -> str:
+        return (
+            f"🏷 {c.get('name','(名称不明)')}\n"
+            f"- 活動日: {c.get('day','未記載')}\n"
+            f"- 場所: {c.get('location','未記載')}\n"
+            f"{('- 概要: ' + c['detail']) if c.get('detail') else ''}"
+            f"{('\n- SNS: ' + c['sns']) if c.get('sns') else ''}"
+        ).rstrip()
+
+    if len(scored) > 3:
+        alt_names = [it.get("name") for (_, it) in scored[3:8] if it.get("name")]
+        alt_line = "\nほかの候補: " + " / ".join(alt_names) if alt_names else ""
+    else:
+        alt_line = ""
+
+    return "\n\n".join([fmt(c) for c in top]) + alt_line
 
 # ===== 天気 =====
 def get_weather(text: str) -> str:
