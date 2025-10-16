@@ -1,3 +1,12 @@
+// src/types/index.ts
+
+// ====== メッセージ添付の型 ======
+export type Attachment =
+  | { kind: 'link'; url: string; title?: string }
+  | { kind: 'chart'; url: string; title?: string; description?: string; height?: number }
+  | { kind: 'image'; dataUrl: string; alt?: string };
+
+// ====== メッセージ本体 ======
 export interface Message {
   id: string;
   content: string;
@@ -5,18 +14,20 @@ export interface Message {
   timestamp: Date;
   category?: string;
   type?: 'text' | 'voice' | 'image';
+  attachments?: Attachment[]; // ← 追加
 }
 
+// ====== カテゴリ ======
 export interface ChatCategory {
   id: string;
   name: string;
-  icon: string;
+  icon: string;       // lucide-react のアイコン名
   description: string;
-  color: string;
+  color: string;      // Tailwind の色クラス（例: 'bg-blue-500'）
   quickActions: string[];
 }
 
-// Web Speech API の型定義
+// ====== Web Speech API 型（グローバル宣言） ======
 declare global {
   interface Window {
     SpeechRecognition: typeof SpeechRecognition;
